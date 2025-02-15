@@ -40,28 +40,28 @@ const layerStyles: Record<string, CircleLayerStyle> = {
 };
 
 export const normalIcon = (
-  showsUserHeadingIndicator?: boolean,
-  heading?: number,
+    showsUserHeadingIndicator?: boolean,
+    heading?: number,
 ) => [
   <CircleLayer
-    key="mapboxUserLocationPluseCircle"
-    id="mapboxUserLocationPluseCircle"
-    style={layerStyles.pluse}
+      key="mapboxUserLocationPluseCircle"
+      id="mapboxUserLocationPluseCircle"
+      style={layerStyles.pluse}
   />,
   <CircleLayer
-    key="mapboxUserLocationWhiteCircle"
-    id="mapboxUserLocationWhiteCircle"
-    style={layerStyles.background}
+      key="mapboxUserLocationWhiteCircle"
+      id="mapboxUserLocationWhiteCircle"
+      style={layerStyles.background}
   />,
   <CircleLayer
-    key="mapboxUserLocationBlueCicle"
-    id="mapboxUserLocationBlueCicle"
-    aboveLayerID="mapboxUserLocationWhiteCircle"
-    style={layerStyles.foreground}
+      key="mapboxUserLocationBlueCicle"
+      id="mapboxUserLocationBlueCicle"
+      aboveLayerID="mapboxUserLocationWhiteCircle"
+      style={layerStyles.foreground}
   />,
   ...(showsUserHeadingIndicator && heading
-    ? [HeadingIndicator({ heading })]
-    : []),
+      ? [HeadingIndicator({ heading })]
+      : []),
 ];
 
 interface UserLocationProps {
@@ -116,6 +116,21 @@ interface UserLocationProps {
    * NOTE: Forking maintainer does not understand the above comment.
    */
   children?: ReactNode;
+  /**
+   * Jeśli chcesz pominąć wewnętrzny LocationManager i podać własne współrzędne zewnętrzne
+   * (np. z expo-location), możesz je przekazać tym polem.
+   * Po ustawieniu, komponent przestaje uruchamiać nasłuchiwanie z LocationManagera.
+   */
+  externalUserLocation?: {
+    coords: {
+      latitude: number;
+      longitude: number;
+      heading?: number;
+      speed?: number;
+      accuracy?: number;
+    };
+    timestamp?: number;
+  };
 }
 
 interface UserLocationState {
@@ -136,171 +151,185 @@ export interface UserLocationRef {
 }
 
 export const UserLocation = memo(
-  forwardRef<UserLocationRef, UserLocationProps>(
-    (
-      {
-        animated = true,
-        visible = true,
-        showsUserHeadingIndicator = false,
-        minDisplacement = 0,
-        renderMode = "normal",
-        androidRenderMode,
-        androidPreferredFramesPerSecond,
-        children,
-        onUpdate,
-        onPress,
-      }: UserLocationProps,
-      ref,
-    ) => {
-      const _isMounted = useRef<boolean | null>(null);
-      const locationManagerRunning = useRef<boolean>(false);
+    forwardRef<UserLocationRef, UserLocationProps>(
+        (
+            {
+              animated = true,
+              visible = true,
+              showsUserHeadingIndicator = false,
+              minDisplacement = 0,
+              renderMode = "normal",
+              androidRenderMode,
+              androidPreferredFramesPerSecond,
+              children,
+              onUpdate,
+              onPress,
+              externalUserLocation,
+            }: UserLocationProps,
+            ref,
+        ) => {
+          const _isMounted = useRef<boolean>(false);
+          const locationManagerRunning = useRef<boolean>(false);
 
-      const [userLocationState, setUserLocationState] =
-        useState<UserLocationState>({
-          shouldShowUserLocation: false,
-        });
+          const [userLocationState, setUserLocationState] =
+              useState<UserLocationState>({
+                shouldShowUserLocation: false,
+              });
 
-      useImperativeHandle(
-        ref,
-        (): UserLocationRef => ({
-          /**
-           * Whether to start or stop listening to the LocationManager
-           *
-           * Notice, that listening will start automatically when
-           * either `onUpdate` or `visible` are set
-           *
-           * @async
-           * @param {{running: boolean}} running - Object with key `running` and `boolean` value
-           * @return {Promise<void>}
-           */
-          setLocationManager,
-          /**
-           *
-           * If LocationManager should be running
-           *
-           * @return {boolean}
-           */
-          needsLocationManagerRunning,
-          _onLocationUpdate,
-        }),
-      );
+          // -- Imperative handle (API):
+          useImperativeHandle(
+              ref,
+              (): UserLocationRef => ({
+                /**
+                 * Czy uruchomić / zatrzymać nasłuchiwanie LocationManagera
+                 */
+                setLocationManager,
+                /**
+                 * If LocationManager should be running
+                 */
+                needsLocationManagerRunning,
+                _onLocationUpdate,
+              }),
+          );
 
-      useEffect(() => {
-        _isMounted.current = true;
+          // -- Główny efekt: reaguje na kluczowe propsy.
+          useEffect(() => {
+            if (!_isMounted.current) return;
 
-        setLocationManager({
-          running: needsLocationManagerRunning(),
-        }).then(() => {
+            if (externalUserLocation) {
+              // Jeśli korzystamy z zewnętrznej lokalizacji, wyłącz menedżera
+              setLocationManager({ running: false });
+            } else {
+              // W przeciwnym razie, normalnie steruj menedżerem
+              setLocationManager({
+                running: needsLocationManagerRunning(),
+              });
+            }
+          }, [visible, onUpdate, renderMode, externalUserLocation]);
+
+          // -- Montowanie/odmontowanie: start + stop manager, ustaw minDisplacement
+          useEffect(() => {
+            _isMounted.current = true;
+
+            // Przy montowaniu: jednorazowe ustawienie menedżera
+            setLocationManager({
+              running: needsLocationManagerRunning(),
+            }).then(() => {
+              if (renderMode === UserLocationRenderMode.Native) {
+                return;
+              }
+              // Ustaw minimalny dystans, ale tylko na starcie
+              LocationManager.setMinDisplacement(minDisplacement ?? 0);
+            });
+
+            // Przy odmontowaniu: wyłącz menedżera
+            return () => {
+              _isMounted.current = false;
+              setLocationManager({ running: false });
+            };
+            // eslint-disable-next-line react-hooks/exhaustive-deps
+          }, []);
+
+          // -- Efekt: jeśli minDisplacement się zmieni, podmień w natywnym managerze
+          useEffect(() => {
+            // Zadziała też przy mount, ale to nie szkodzi
+            LocationManager.setMinDisplacement(minDisplacement ?? 0);
+          }, [minDisplacement]);
+
+          // -------------------------------------------
+          // Implementacja metod:
+          // -------------------------------------------
+          async function setLocationManager({
+                                              running,
+                                            }: {
+            running: boolean;
+          }): Promise<void> {
+            if (locationManagerRunning.current !== running) {
+              locationManagerRunning.current = running;
+
+              if (running) {
+                LocationManager.addListener(_onLocationUpdate);
+                const location = await LocationManager.getLastKnownLocation();
+                _onLocationUpdate(location);
+              } else {
+                LocationManager.removeListener(_onLocationUpdate);
+              }
+            }
+          }
+
+          function needsLocationManagerRunning(): boolean {
+            // Normalny warunek: onUpdate lub widoczny marker w trybie 'Normal'
+            return !!(
+                !!onUpdate ||
+                (renderMode === UserLocationRenderMode.Normal && visible)
+            );
+          }
+
+          function _onLocationUpdate(location: Location | null): void {
+            if (!_isMounted.current) {
+              return;
+            }
+
+            // Jeśli mamy zewnętrzną lokalizację, używamy jej zamiast wewnętrznej
+            const usedLocation = externalUserLocation ?? location;
+            if (!usedLocation?.coords) {
+              return;
+            }
+
+            const { longitude, latitude, heading } = usedLocation.coords;
+            const coordinates = [longitude, latitude];
+
+            setUserLocationState((prev) => ({
+              ...prev,
+              coordinates,
+              heading,
+            }));
+
+            if (onUpdate) {
+              // Wywołujemy onUpdate z danymi z 'usedLocation'
+              onUpdate(usedLocation);
+            }
+          }
+
+          // -------------------------------------------
+          // Render:
+          // -------------------------------------------
+          if (!visible) {
+            return null;
+          }
+
+          // Tryb NATYWNY
           if (renderMode === UserLocationRenderMode.Native) {
-            return;
+            const nativeProps = {
+              androidRenderMode,
+              iosShowsUserHeadingIndicator: showsUserHeadingIndicator,
+              androidPreferredFramesPerSecond,
+            };
+            return <NativeUserLocation {...nativeProps} />;
           }
 
-          LocationManager.setMinDisplacement(minDisplacement ?? 0);
-        });
-
-        return (): void => {
-          _isMounted.current = false;
-          setLocationManager({ running: false });
-        };
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-      }, []);
-
-      useEffect(() => {
-        LocationManager.setMinDisplacement(minDisplacement ?? 0);
-      }, [minDisplacement]);
-
-      useEffect(() => {
-        if (!_isMounted.current) {
-          return;
-        }
-
-        setLocationManager({
-          running: needsLocationManagerRunning(),
-        });
-      });
-
-      async function setLocationManager({
-        running,
-      }: {
-        running: boolean;
-      }): Promise<void> {
-        if (locationManagerRunning.current !== running) {
-          locationManagerRunning.current = running;
-
-          if (running) {
-            LocationManager.addListener(_onLocationUpdate);
-            const location = await LocationManager.getLastKnownLocation();
-            _onLocationUpdate(location);
-          } else {
-            LocationManager.removeListener(_onLocationUpdate);
+          // Tryb 'normal' + brak coordinates -> nic nie pokazujemy
+          if (!userLocationState.coordinates) {
+            return null;
           }
-        }
-      }
 
-      function needsLocationManagerRunning(): boolean {
-        return !!(
-          !!onUpdate ||
-          (renderMode === UserLocationRenderMode.Normal && visible)
-        );
-      }
-
-      function _onLocationUpdate(location: Location | null): void {
-        if (!_isMounted.current || !location) {
-          return;
-        }
-
-        let coordinates;
-        let heading;
-
-        if (location && location.coords) {
-          const { longitude, latitude } = location.coords;
-          heading = location.coords.heading;
-          coordinates = [longitude, latitude];
-        }
-
-        setUserLocationState({
-          ...userLocationState,
-          coordinates,
-          heading,
-        });
-
-        if (onUpdate) {
-          onUpdate(location);
-        }
-      }
-
-      if (!visible) {
-        return null;
-      }
-
-      if (renderMode === UserLocationRenderMode.Native) {
-        const props = {
-          androidRenderMode,
-          iosShowsUserHeadingIndicator: showsUserHeadingIndicator,
-          androidPreferredFramesPerSecond,
-        };
-
-        return <NativeUserLocation {...props} />;
-      }
-
-      if (!userLocationState.coordinates) {
-        return null;
-      }
-
-      return (
-        <Annotation
-          animated={animated}
-          id="mapboxUserLocation"
-          onPress={onPress}
-          coordinates={userLocationState.coordinates}
-          style={{
-            iconRotate: userLocationState.heading,
-          }}
-        >
-          {children ||
-            normalIcon(showsUserHeadingIndicator, userLocationState.heading)}
-        </Annotation>
-      );
-    },
-  ),
+          return (
+              <Annotation
+                  animated={animated}
+                  id="mapboxUserLocation"
+                  onPress={onPress}
+                  coordinates={userLocationState.coordinates}
+                  style={{
+                    iconRotate: userLocationState.heading,
+                  }}
+              >
+                {children ||
+                    normalIcon(
+                        showsUserHeadingIndicator,
+                        userLocationState.heading
+                    )}
+              </Annotation>
+          );
+        },
+    ),
 );
